@@ -1,6 +1,6 @@
 {
   "name": "@asenajs/asena-kafka",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "author": "LibirSoft",
   "description": "Kafka integration for AsenaJS - service client and microservice transport",
   "main": "dist/index.js",
