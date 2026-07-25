@@ -25,7 +25,7 @@ Kafka integration for AsenaJS — service client and microservice transport.
 ## Requirements
 
 - [Bun](https://bun.sh) v1.3.12 or higher
-- [@asenajs/asena](https://github.com/AsenaJs/Asena) v0.7.0 or higher
+- [@asenajs/asena](https://github.com/AsenaJs/Asena) v0.8.0 or higher
 - [kafkajs](https://kafka.js.org) v2.2.4 (peer dependency)
 - Apache Kafka **2.8 – 3.9**. Kafka 4.0 removed old protocol API versions (KIP-896) and kafkajs 2.2.4 has reported incompatibilities — pin your broker to 3.9.x. See [Client Roadmap](#client-roadmap).
 
