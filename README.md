@@ -4,7 +4,7 @@
 
 # @asenajs/asena-kafka
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/AsenaJs/asena-kafka)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/AsenaJs/asena-kafka)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Bun Version](https://img.shields.io/badge/Bun-1.3.12%2B-blueviolet)](https://bun.sh)
 
@@ -25,7 +25,7 @@ Kafka integration for AsenaJS — service client and microservice transport.
 ## Requirements
 
 - [Bun](https://bun.sh) v1.3.12 or higher
-- [@asenajs/asena](https://github.com/AsenaJs/Asena) v0.7.0 or higher
+- [@asenajs/asena](https://github.com/AsenaJs/Asena) v0.9.0 or higher
 - [kafkajs](https://kafka.js.org) v2.2.4 (peer dependency)
 - Apache Kafka **2.8 – 3.9**. Kafka 4.0 removed old protocol API versions (KIP-896) and kafkajs 2.2.4 has reported incompatibilities — pin your broker to 3.9.x. See [Client Roadmap](#client-roadmap).
 
@@ -216,12 +216,13 @@ Passed through to the kafkajs `Kafka` constructor: `brokers` (required), `client
 | `maxWaitTimeInMs` | `1000` | Idle fetch long-poll (boot readiness / shutdown responsiveness) |
 | `eventPartitions` / `requestPartitions` / `replyPartitions` | `4` | Partition counts for transport-created topics |
 | `replicationFactor` | `-1` | Broker default |
-| `healthCheckIntervalMs` | `5000` | Active broker probe driving `isConnected` (health endpoint 503 on failure) |
+| `healthCheckIntervalMs` | `5000` | Interval of the active broker probe — one of the two inputs to `isConnected` (see Operational Notes) |
 | `external` | — | Foreign-topic interop: `{ topics: (string \| { name, keyHeader? })[], fromBeginning? }` — see [External Topics](#external-topics-interop) |
 
 ## Operational Notes
 
 - **Handler duration must stay below `sessionTimeout`** — kafkajs cannot heartbeat while a handler runs; a longer handler gets the member evicted and the record concurrently redelivered elsewhere.
+- **`isConnected` means "can serve", not "a broker answers"** — it requires both a passing metadata probe and a reply consumer that has rejoined and is fetching. After a broker outage the probe recovers in milliseconds while the ephemeral reply group can still be rejoining ~20 seconds later, and until it fetches nothing consumes replies, so every `send()` would time out. Expect an instance to stay 503 for the length of that rejoin, and keep the liveness probe more forgiving than the readiness probe.
 - **Rolling deploys**: kafkajs uses eager rebalancing — every membership change briefly pauses the whole group. Graceful shutdown (`destroy()`) leaves the group cleanly so the pause is short; SIGKILL costs a full `sessionTimeout`.
 - **Ordering**: with the default multi-partition event topic, cross-partition ordering is not preserved. Set `eventPartitions: 1` if you need strict publish order (at the cost of parallelism).
 - Under Bun you may see a cosmetic `TimeoutNegativeWarning` from kafkajs's request queue — Bun warns where Node silently clamps negative timers to 1ms; behavior is identical.
