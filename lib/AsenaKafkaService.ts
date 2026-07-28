@@ -103,7 +103,9 @@ export abstract class AsenaKafkaService {
       await admin.connect();
 
       const probe = admin.listTopics();
-      const bound = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000));
+      const bound = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('probe timeout')), 3000);
+      });
 
       await Promise.race([probe, bound]);
 

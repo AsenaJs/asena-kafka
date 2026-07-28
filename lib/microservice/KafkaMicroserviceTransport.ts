@@ -56,6 +56,13 @@ const REPLY_MAX_WAIT_TIME = 500;
 const TOPIC_VISIBILITY_TIMEOUT = 10_000;
 const START_PIN_TIMEOUT = 5_000;
 const STARTUP_RETRY_TIMEOUT = 20_000;
+// The reply consumer long-polls every REPLY_MAX_WAIT_TIME, so an idle-but-
+// healthy consumer emits FETCH ~2x per second. Ten times that gap means it is
+// not fetching - rejoining, backing off, or dead - and the instance cannot
+// complete a send(). Chosen well above the poll interval so ordinary jitter
+// never flaps readiness, and well below kafkajs's own ~7.5s CRASH detection.
+const REPLY_FETCH_STALE_TIMEOUT = 5_000;
+const REPLY_PIN_TIMEOUT = 10_000;
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -87,8 +94,11 @@ interface AttemptMarker {
  *   without execution - the caller has already given up.
  * - Replies: one shared topic `{prefix}.reply`; every caller instance runs an
  *   ephemeral consumer group (`{prefix}.{service}.reply.{instance8}`) and
- *   filters by correlationId. The group is deleted on destroy; abandoned
- *   groups are reaped by the broker's offsets.retention.
+ *   filters by correlationId. Its start position is pinned as a committed
+ *   offset (pinReplyStart), so a rejoin resumes where it left off instead of
+ *   re-resolving 'latest' and skipping a reply appended while it was away.
+ *   The group is deleted on destroy; abandoned groups are reaped by the
+ *   broker's offsets.retention.
  *
  * Attempt tracking (broker-persisted): before dispatching the record at
  * offset X the transport commits offset X (= "next fetch starts at X") with
@@ -178,6 +188,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
 
   private startPins = new Map<string, string>();
 
+  /** Reply-topic start pins, by partition - see pinReplyStart. */
+  private replyStartPins = new Map<number, string>();
+
   private ensuredTopics = new Set<string>();
 
   private retryTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -201,6 +214,14 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
   private lastProbeOk = true;
 
   private probing = false;
+
+  private replyRecreating = false;
+
+  private replyJoined = false;
+
+  private replyFetchAt = 0;
+
+  private replyFetchWaiters: (() => void)[] = [];
 
   public constructor(source: AsenaKafkaService | KafkaConfig, options: KafkaMicroserviceOptions) {
     if (!options?.serviceName) {
@@ -278,8 +299,34 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
     this.handlerTimeout = options.handlerTimeout ?? Math.min(DEFAULT_HANDLER_TIMEOUT, this.sessionTimeout);
   }
 
+  /**
+   * Readiness = "this instance can actually serve", not "a broker answers".
+   *
+   * The admin metadata probe alone is not that: after a broker outage it
+   * succeeds again long before the ephemeral reply consumer has rejoined its
+   * group - measured at ~21s from the reply consumer's last fetch to its next
+   * one, against a probe that went green in 0.45-0.95s. Every send() issued in
+   * that window times out (nothing consumes the reply topic) behind a green
+   * health endpoint, so readiness gates on the reply consumer fetching too.
+   * That holds for a client-only instance as well - an HTTP gateway never
+   * sets `running`, and it is the instance that depends on it most.
+   */
   public get isConnected(): boolean {
-    return this.connected && this.lastProbeOk;
+    return this.connected && this.lastProbeOk && this.replyServing;
+  }
+
+  /**
+   * True while the reply consumer is joined and its fetch loop is turning.
+   * kafkajs raises CRASH/DISCONNECT/STOP only after its own retries are spent
+   * (~7.5s), so a stalled fetch loop is the earlier and more reliable signal;
+   * the events reset the flags on top of it.
+   */
+  private get replyServing(): boolean {
+    return this.replyConsumer !== undefined && this.replyJoined && this.replyFetchAge <= REPLY_FETCH_STALE_TIMEOUT;
+  }
+
+  private get replyFetchAge(): number {
+    return this.replyFetchAt === 0 ? Number.POSITIVE_INFINITY : Date.now() - this.replyFetchAt;
   }
 
   public async init(): Promise<void> {
@@ -322,7 +369,7 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
       throw new Error(
         `Message pattern "${pattern}" cannot contain wildcards - request/response requires exact routing ` +
           '(a wildcard likely leaked in via the @MessageController prefix - remove it, or set ' +
-            'prefix: false on the @MessagePattern)',
+          'prefix: false on the @MessagePattern)',
       );
     }
 
@@ -440,7 +487,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
             return;
           }
 
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          await new Promise((resolve) => {
+            setTimeout(resolve, 100);
+          });
         }
       }
     }
@@ -568,6 +617,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
 
     this.retryTimers.clear();
 
+    // An in-flight start-pin wait must not hold a timer past teardown
+    this.releaseReplyFetchWaiters();
+
     // 2. Drain in-flight handlers. Finished ones commit their offsets;
     //    unfinished ones stay uncommitted for another replica -
     //    at-least-once tolerates this (and R2 depends on it: a failed
@@ -575,7 +627,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
     if (this.inFlight.size) {
       await Promise.race([
         Promise.allSettled([...this.inFlight]),
-        new Promise((resolve) => setTimeout(resolve, drainTimeout)),
+        new Promise((resolve) => {
+          setTimeout(resolve, drainTimeout);
+        }),
       ]);
     }
 
@@ -659,12 +713,18 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
           (error as Error).message,
         );
 
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => {
+          setTimeout(resolve, 250);
+        });
       }
     }
   }
 
   private async startReplyConsumer(): Promise<void> {
+    // Pre-run 'latest' snapshot of the reply topic, committed on join for
+    // partitions that have no committed offset yet (see pinReplyStart)
+    await this.captureReplyStartPins();
+
     const replyConsumer = this.adapter.consumer({
       groupId: this.naming.replyGroupId(this.serviceName, this.instanceId),
       sessionTimeout: this.sessionTimeout,
@@ -677,8 +737,70 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
 
     this.replyConsumer = replyConsumer;
 
-    const joined = new Promise<void>((resolve) => replyConsumer.on(replyConsumer.events.GROUP_JOIN, () => resolve()));
-    const fetched = new Promise<void>((resolve) => replyConsumer.on(replyConsumer.events.FETCH, () => resolve()));
+    // The replacement has not joined anything yet - readiness must not inherit
+    // the outgoing consumer's state
+    this.replyJoined = false;
+    this.replyFetchAt = 0;
+
+    // A superseded consumer keeps emitting (its DISCONNECT lands after the
+    // replacement is already running) - its events must never touch the
+    // readiness of the consumer that replaced it.
+    const isCurrent = (): boolean => this.replyConsumer === replyConsumer;
+
+    const notServing = (): void => {
+      if (!isCurrent()) return;
+
+      this.replyJoined = false;
+      this.replyFetchAt = 0;
+    };
+
+    // kafkajs restarts itself on retriable errors; a non-restarting crash
+    // (retries exhausted - e.g. a broker outage that outlasted them) leaves
+    // this consumer stopped for good. Without a recreate the instance never
+    // completes another send(): requests still publish and the responder
+    // still replies, but nobody consumes the reply topic, so every caller
+    // times out. Guarded by `destroyed`, not `running`: a client-only
+    // instance (no handlers, e.g. an HTTP gateway) never sets running, and it
+    // is exactly the instance that depends on this consumer most.
+    replyConsumer.on(replyConsumer.events.CRASH, (event) => {
+      notServing();
+      this.lastProbeOk = false;
+
+      // replyRecreating also covers a crash raised while init()'s startup
+      // retry is still looping - without it both paths would build a reply
+      // consumer and only the last one would ever be disconnected.
+      if (!this.destroyed && !this.replyRecreating && event?.payload?.restart === false) {
+        void this.recreateReplyConsumer();
+      }
+    });
+
+    replyConsumer.on(replyConsumer.events.DISCONNECT, notServing);
+    replyConsumer.on(replyConsumer.events.STOP, notServing);
+
+    replyConsumer.on(replyConsumer.events.GROUP_JOIN, (event) => {
+      if (!isCurrent()) return;
+
+      this.replyJoined = true;
+
+      // Every join, not just the first: kafkajs rejoins on its own after a
+      // retriable crash, and that rejoin is exactly when a missing committed
+      // offset turns into permanent reply loss.
+      void this.pinReplyStart(replyConsumer, (event?.payload?.memberAssignment ?? {}) as Record<string, number[]>);
+    });
+
+    replyConsumer.on(replyConsumer.events.FETCH, () => {
+      if (!isCurrent()) return;
+
+      this.replyFetchAt = Date.now();
+      this.releaseReplyFetchWaiters();
+    });
+
+    const joined = new Promise<void>((resolve) => {
+      replyConsumer.on(replyConsumer.events.GROUP_JOIN, () => resolve());
+    });
+    const fetched = new Promise<void>((resolve) => {
+      replyConsumer.on(replyConsumer.events.FETCH, () => resolve());
+    });
 
     try {
       await replyConsumer.connect();
@@ -699,7 +821,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
     // the "latest" position resolved, so a reply produced from now on cannot
     // land before the consumer's start offset. Bounded - a slow broker
     // degrades to possibly-missed early replies (caller times out and
-    // retries) instead of a hung boot.
+    // retries) instead of a hung boot. Every LATER join is covered by the
+    // committed start pin instead (pinReplyStart), and isConnected reports
+    // false until the fetch loop is turning again either way.
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const ready = await Promise.race([
@@ -714,6 +838,118 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
         `KafkaMicroserviceTransport(${this.serviceName}): reply consumer not ready after ${REPLY_READY_TIMEOUT}ms - early sends may time out`,
       );
     }
+  }
+
+  /**
+   * Pre-run 'latest' snapshot of the reply topic - the reply-consumer twin of
+   * captureStartPins. Captured ONCE: a recapture during a post-outage
+   * recreate would move the pin past the very reply the outage put at risk.
+   */
+  private async captureReplyStartPins(): Promise<void> {
+    if (this.replyStartPins.size) return;
+
+    const deadline = Date.now() + START_PIN_TIMEOUT;
+
+    for (;;) {
+      try {
+        for (const partition of await this.admin!.fetchTopicOffsets(this.naming.replyTopic)) {
+          this.replyStartPins.set(partition.partition, partition.high);
+        }
+
+        return;
+      } catch (error) {
+        if (this.destroyed || Date.now() > deadline) {
+          // Best effort - without pins the reply consumer falls back to
+          // resolve-at-join, i.e. the behaviour this pin exists to replace
+          console.error(`KafkaMicroserviceTransport(${this.serviceName}): reply start-pin capture failed:`, error);
+
+          return;
+        }
+
+        await new Promise((resolve) => {
+          setTimeout(resolve, 100);
+        });
+      }
+    }
+  }
+
+  /**
+   * Start-position pinning for the ephemeral reply group, the twin of the
+   * main consumer's pinning in loadMarkers.
+   *
+   * The reply group subscribes with fromBeginning:false and kafkajs never
+   * commits an offset for a partition that delivered nothing - so on a
+   * caller that has served no reply on a partition yet, the group holds NO
+   * committed offset for it and every rejoin re-resolves 'latest'. A reply
+   * appended while the consumer was away is then skipped forever: the
+   * responder produced it, the topic holds it, the group is Stable, and the
+   * caller still times out. Committing the pre-run watermark for assigned
+   * partitions without a committed offset turns that permanent loss into a
+   * late delivery at worst; from then on autoCommit carries the position.
+   */
+  private async pinReplyStart(consumer: KafkaConsumerLike, assignment: Record<string, number[]>): Promise<void> {
+    const partitions = assignment[this.naming.replyTopic] ?? [];
+
+    if (!partitions.length || !this.replyStartPins.size) return;
+
+    // kafkajs DROPS commitOffsets() while its runner is still joining
+    // (Runner.running flips only after joinAndSync returns), so the commit
+    // waits for the first completed fetch of this generation
+    if (!(await this.awaitReplyFetch(consumer))) return;
+
+    try {
+      const fetched = await this.admin!.fetchOffsets({
+        groupId: this.naming.replyGroupId(this.serviceName, this.instanceId),
+        topics: [this.naming.replyTopic],
+      });
+      const committed = new Map<number, number>();
+
+      for (const topicOffsets of fetched) {
+        for (const partition of topicOffsets.partitions) {
+          committed.set(partition.partition, Number(partition.offset));
+        }
+      }
+
+      const pins = partitions
+        .filter((partition) => (committed.get(partition) ?? -1) < 0 && this.replyStartPins.has(partition))
+        .map((partition) => ({
+          topic: this.naming.replyTopic,
+          partition,
+          offset: this.replyStartPins.get(partition)!,
+          metadata: null,
+        }));
+
+      if (pins.length && this.replyConsumer === consumer && !this.destroyed) {
+        await consumer.commitOffsets(pins);
+      }
+    } catch (error) {
+      // Degraded (the partition falls back to resolve-at-join) but never fatal
+      console.error(`KafkaMicroserviceTransport(${this.serviceName}): reply start-pin commit failed:`, error);
+    }
+  }
+
+  private releaseReplyFetchWaiters(): void {
+    const waiters = this.replyFetchWaiters;
+
+    this.replyFetchWaiters = [];
+
+    for (const waiter of waiters) waiter();
+  }
+
+  /** Resolves on the reply consumer's next completed fetch; false if it is superseded or the wait times out. */
+  private awaitReplyFetch(consumer: KafkaConsumerLike): Promise<boolean> {
+    if (this.replyConsumer !== consumer) return Promise.resolve(false);
+
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (fetched: boolean): void => {
+        clearTimeout(timer);
+        resolve(fetched && this.replyConsumer === consumer && !this.destroyed);
+      };
+
+      this.replyFetchWaiters.push(() => settle(true));
+      timer = setTimeout(() => settle(false), REPLY_PIN_TIMEOUT);
+    });
   }
 
   private async startMainConsumer(topics: string[]): Promise<void> {
@@ -745,8 +981,12 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
       }
     });
 
-    const joined = new Promise<void>((resolve) => consumer.on(consumer.events.GROUP_JOIN, () => resolve()));
-    const fetched = new Promise<void>((resolve) => consumer.on(consumer.events.FETCH, () => resolve()));
+    const joined = new Promise<void>((resolve) => {
+      consumer.on(consumer.events.GROUP_JOIN, () => resolve());
+    });
+    const fetched = new Promise<void>((resolve) => {
+      consumer.on(consumer.events.FETCH, () => resolve());
+    });
 
     const own = topics.filter((topic) => !this.externalTopics.has(topic));
     const external = topics.filter((topic) => this.externalTopics.has(topic));
@@ -798,6 +1038,45 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
       console.error(
         `KafkaMicroserviceTransport(${this.serviceName}): consumer not ready after ${LISTEN_READY_TIMEOUT}ms - early messages may be missed`,
       );
+    }
+  }
+
+  /** Reply-consumer twin of recreateConsumer - see the CRASH handler in startReplyConsumer. */
+  private async recreateReplyConsumer(): Promise<void> {
+    let backoff = RECONNECT_BACKOFF_START;
+
+    this.replyRecreating = true;
+
+    try {
+      while (!this.destroyed) {
+        try {
+          if (this.replyConsumer) {
+            await this.bounded(this.replyConsumer.disconnect());
+            this.replyConsumer = undefined;
+          }
+
+          await this.startReplyConsumer();
+
+          return;
+        } catch (error) {
+          console.error(`KafkaMicroserviceTransport(${this.serviceName}): reply consumer recreate failed:`, error);
+
+          // Raced against the stop signal so destroy() never waits out a
+          // capped (up to 30s) backoff sleep
+          let timer: ReturnType<typeof setTimeout> | undefined;
+
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, backoff);
+            }),
+            this.stopPromise,
+          ]).finally(() => clearTimeout(timer));
+
+          backoff = Math.min(backoff * 2, RECONNECT_BACKOFF_CAP);
+        }
+      }
+    } finally {
+      this.replyRecreating = false;
     }
   }
 
@@ -1238,7 +1517,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
       } catch (error) {
         if (this.destroyed || Date.now() > createDeadline) throw error;
 
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => {
+          setTimeout(resolve, 100);
+        });
       }
     }
 
@@ -1269,7 +1550,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
         throw new Error(`Topics [${names.join(', ')}] have no elected leaders after ${TOPIC_VISIBILITY_TIMEOUT}ms`);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => {
+        setTimeout(resolve, 100);
+      });
     }
 
     for (const topic of missing) {
@@ -1280,7 +1563,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
         } catch (error) {
           if (Date.now() > deadline) throw error;
 
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          await new Promise((resolve) => {
+            setTimeout(resolve, 100);
+          });
         }
       }
     }
@@ -1322,7 +1607,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
 
       if (Date.now() > deadline) throw unavailable(null);
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => {
+        setTimeout(resolve, 100);
+      });
     }
 
     for (const topic of topics) {
@@ -1333,7 +1620,9 @@ export class KafkaMicroserviceTransport implements MicroserviceTransport {
         } catch (error) {
           if (Date.now() > deadline) throw unavailable(error);
 
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          await new Promise((resolve) => {
+            setTimeout(resolve, 100);
+          });
         }
       }
     }

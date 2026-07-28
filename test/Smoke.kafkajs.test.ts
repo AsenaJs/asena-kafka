@@ -45,7 +45,9 @@ async function waitFor(cond: () => boolean, timeoutMs: number, label: string): P
   while (!cond()) {
     if (Date.now() > deadline) throw new Error(`waitFor timed out: ${label}`);
 
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => {
+      setTimeout(r, 50);
+    });
   }
 }
 
@@ -64,7 +66,9 @@ describe('kafkajs-on-Bun smoke (P0 gate)', () => {
       } catch (error) {
         if (Date.now() > deadline) throw error;
 
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => {
+          setTimeout(r, 1000);
+        });
       }
     }
 
