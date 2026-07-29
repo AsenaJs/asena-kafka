@@ -25,7 +25,7 @@ Kafka integration for AsenaJS — service client and microservice transport.
 ## Requirements
 
 - [Bun](https://bun.sh) v1.3.12 or higher
-- [@asenajs/asena](https://github.com/AsenaJs/Asena) v0.9.0 or higher
+- [@asenajs/asena](https://github.com/AsenaJs/Asena) v0.10.0 or higher
 - [kafkajs](https://kafka.js.org) v2.2.4 (peer dependency)
 - Apache Kafka **2.8 – 3.9**. Kafka 4.0 removed old protocol API versions (KIP-896) and kafkajs 2.2.4 has reported incompatibilities — pin your broker to 3.9.x. See [Client Roadmap](#client-roadmap).
 
@@ -116,6 +116,8 @@ export class AppKafka extends AsenaKafkaService {
 ```
 
 `AsenaKafkaService` exposes `sendMessage(topic, messages)`, `createProducer()`, `createConsumer(config)`, `createAdmin()`, `client`, `disconnect()` and `testConnection()`. The transport can borrow a decorated service too: `new KafkaMicroserviceTransport(appKafka, { serviceName })` — it still creates its own producer/consumers, your client is never touched.
+
+The service connects on `server.start()` and disconnects itself on `server.stop()`. Objects from `createProducer()` / `createConsumer(config)` / `createAdmin()` stay yours: close them from an `@OnStop()` on the component that created them, which runs while the service is still up.
 
 ## Delivery Model
 
