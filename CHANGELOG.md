@@ -1,5 +1,25 @@
 # @asenajs/asena-kafka
 
+## 3.0.0
+
+### Major Changes
+
+- `@OnStop` disconnects the default producer, and the core peer moves to `^0.10.0`
+
+  Nothing in the framework ever called `AsenaKafkaService.disconnect()`, so the producer behind
+  `sendMessage()` outlived the server it belonged to. `server.stop()` now hands it back.
+
+  `@PostConstruct` on `onStart()` is now `@OnStart` — the same metadata key, renamed with the core.
+
+  Objects from `createProducer()`, `createConsumer()` and `createAdmin()` remain **caller-owned**;
+  the README now points at `@OnStop` as the place to close them, since components stop in reverse
+  start order and a consumer's owner therefore stops while this service is still up.
+
+  **Breaking:**
+
+  - Requires `@asenajs/asena@^0.10.0`. A 0.9.x application cannot use this version.
+  - A client supplied through `@Kafka({ client })` is now closed on `server.stop()` as well.
+
 ## 2.0.0
 
 ### Major Changes

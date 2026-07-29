@@ -47,6 +47,22 @@ describe('AsenaKafkaService', () => {
 
       expect(() => bare.client).toThrow('not initialized');
     });
+
+    it('should release the client from the stop hook', async () => {
+      const scoped = new TestKafkaService();
+
+      scoped.initWithOptions({ config: { brokers: BROKERS }, logger: quietLogger });
+      await scoped.onStart();
+
+      expect(scoped.client.isConnected).toBe(true);
+
+      await scoped.onStop();
+
+      expect(() => scoped.client).toThrow('not initialized');
+
+      // Shutdown containment: a second pass over a component that already let go must not throw
+      await scoped.onStop();
+    }, 30000);
   });
 
   describe('Produce & factories', () => {

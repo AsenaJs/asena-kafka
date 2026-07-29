@@ -1,4 +1,4 @@
-import { PostConstruct } from '@asenajs/asena/decorators/ioc';
+import { OnStart, OnStop } from '@asenajs/asena/decorators/ioc';
 import type {
   KafkaAdminLike,
   KafkaClientAdapter,
@@ -16,7 +16,7 @@ export abstract class AsenaKafkaService {
 
   protected options: KafkaOptions | null = null;
 
-  @PostConstruct()
+  @OnStart()
   public async onStart() {
     if (!this.options) {
       throw new Error('Kafka options not initialized. Make sure to use @Kafka decorator properly.');
@@ -55,8 +55,39 @@ export abstract class AsenaKafkaService {
     return this.getClient().send({ topic, messages });
   }
 
-  // Factories - returned objects are owned (connected/disconnected) by the caller
-
+  /**
+   * Factories - returned objects are owned (connected/disconnected) by the caller.
+   *
+   * Neither this service nor the framework tracks them: a consumer closed at a moment the
+   * application did not choose is worse than one the application has to close itself.
+   *
+   * Release them from an `@OnStop` on the component that created them. Components stop in the
+   * reverse of the order they started, so a component that injects this service stops while the
+   * service - and its client - is still up:
+   *
+   * ```typescript
+   * @Service()
+   * class AuditReader {
+   *   @Inject(AppKafka)
+   *   private kafka: AppKafka;
+   *
+   *   private consumer: KafkaConsumerLike;
+   *
+   *   @OnStart()
+   *   public async start() {
+   *     this.consumer = this.kafka.createConsumer({ groupId: 'audit' });
+   *     await this.consumer.connect();
+   *     await this.consumer.subscribe({ topics: ['audit.log'] });
+   *     await this.consumer.run({ eachMessage: async ({ message }) => this.handle(message) });
+   *   }
+   *
+   *   @OnStop()
+   *   public async stop() {
+   *     await this.consumer?.disconnect();
+   *   }
+   * }
+   * ```
+   */
   public createProducer(): KafkaProducerLike {
     return this.getClient().producer();
   }
@@ -84,6 +115,22 @@ export abstract class AsenaKafkaService {
   }
 
   // Lifecycle
+
+  /**
+   * Hands the client back on `server.stop()`.
+   *
+   * Nothing ever called `disconnect()` for the application, so the client `onStart` brought up -
+   * and the default producer behind `sendMessage()` with it - outlived the server it belonged
+   * to. This runs after every component that injects this service has stopped, so nobody is
+   * mid-publish when the producer goes. A client passed as `options.client` goes down here too:
+   * `onStart` takes it as the one the service runs on, and so does this.
+   *
+   * What the factories handed out is left alone - those were never ours to close.
+   */
+  @OnStop()
+  public async onStop(): Promise<void> {
+    await this.disconnect();
+  }
 
   public async disconnect(): Promise<void> {
     if (this._client) {
