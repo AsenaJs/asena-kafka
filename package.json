@@ -13,7 +13,7 @@
   ],
   "license": "MIT",
   "engines": {
-    "bun": ">=1.3.12"
+    "bun": ">=1.4.0"
   },
   "keywords": [
     "kafka",
@@ -55,7 +55,7 @@
     "check:fix": "bun run lint:fix && bun run format"
   },
   "devDependencies": {
-    "@asenajs/asena": "^0.10.0",
+    "@asenajs/asena": "^0.11.0",
     "@changesets/cli": "^2.29.3",
     "@types/bun": "latest",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
@@ -72,7 +72,7 @@
     "reflect-metadata": "^0.2.2"
   },
   "peerDependencies": {
-    "@asenajs/asena": "^0.10.0",
+    "@asenajs/asena": "^0.11.0",
     "kafkajs": "^2.2.4",
     "reflect-metadata": "^0.2.2",
     "typescript": "^5.8.2"

@@ -4,9 +4,9 @@
 
 # @asenajs/asena-kafka
 
-[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](https://github.com/AsenaJs/asena-kafka)
+[![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](https://github.com/AsenaJs/asena-kafka)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Bun Version](https://img.shields.io/badge/Bun-1.3.12%2B-blueviolet)](https://bun.sh)
+[![Bun Version](https://img.shields.io/badge/Bun-1.4%2B-blueviolet)](https://bun.sh)
 
 Kafka integration for AsenaJS — service client and microservice transport.
 
@@ -24,8 +24,8 @@ Kafka integration for AsenaJS — service client and microservice transport.
 
 ## Requirements
 
-- [Bun](https://bun.sh) v1.3.12 or higher
-- [@asenajs/asena](https://github.com/AsenaJs/Asena) v0.10.0 or higher
+- [Bun](https://bun.sh) v1.4 or higher
+- [@asenajs/asena](https://github.com/AsenaJs/Asena) v0.11.0 or higher
 - [kafkajs](https://kafka.js.org) v2.2.4 (peer dependency)
 - Apache Kafka **2.8 – 3.9**. Kafka 4.0 removed old protocol API versions (KIP-896) and kafkajs 2.2.4 has reported incompatibilities — pin your broker to 3.9.x. See [Client Roadmap](#client-roadmap).
 
