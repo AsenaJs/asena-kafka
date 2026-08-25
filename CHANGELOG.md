@@ -1,5 +1,11 @@
 # @asenajs/asena-kafka
 
+## 4.0.0
+
+### Major Changes
+
+- 4390f39: Requires `@asenajs/asena` `^0.11.0` as the peer dependency and Bun 1.4. Core 0.10.x is outside the peer range.
+
 ## 3.0.0
 
 ### Major Changes
