@@ -1,5 +1,11 @@
 # @asenajs/asena-kafka
 
+## 4.0.1
+
+### Patch Changes
+
+- 72c4c70: `@asenajs/asena` 0.12.x is now an accepted peer. No behaviour change.
+
 ## 4.0.0
 
 ### Major Changes
