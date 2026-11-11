@@ -1,5 +1,11 @@
 # @asenajs/asena-kafka
 
+## 4.0.2
+
+### Patch Changes
+
+- 750bcc2: Accept @asenajs/asena 0.13 as a peer.
+
 ## 4.0.1
 
 ### Patch Changes
