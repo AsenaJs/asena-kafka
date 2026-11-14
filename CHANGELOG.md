@@ -1,5 +1,11 @@
 # @asenajs/asena-kafka
 
+## 4.0.3
+
+### Patch Changes
+
+- 5d013f8: Accept TypeScript 7 as a peer dependency and build with TypeScript 7 in development. The emitted `.js` and `.d.ts` output is unchanged.
+
 ## 4.0.2
 
 ### Patch Changes
